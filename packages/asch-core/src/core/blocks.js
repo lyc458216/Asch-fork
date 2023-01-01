@@ -309,7 +309,7 @@ Blocks.prototype.verifyBlockVotes = async (block, votes) => {
     }
   }
 }
-
+// 首先验证交易是否存在，如果没有交易则调用modules.transactions.applyUnconfirmedTransactionAsync(transaction)处理。
 Blocks.prototype.applyBlock = async (block) => {
   app.logger.trace('enter applyblock')
   const appliedTransactions = {}
@@ -378,6 +378,16 @@ Blocks.prototype.commitGeneratedBlock = async (block, failedTransactions, votes)
   }
 }
 // 区块处理
+// 产块节点在收集到足够的票数以后做的事
+// processBlock主要有以下步骤:
+// 1) 用base.block.sortTransactions排序区块的交易列表。
+// 2) 用verifyBlock进行验证区块。
+// 3) 数据库里查询该block信息，如果block已存在则报错返回。 4) 用modules.delegates.validateBlockSlot验证区块slot，如果验证没通过，则记录这次是分叉，并报错返回。 5) 从数据库查询该交易信息，如果交易已存在则报错返回。
+// 6) 用base.transactions.verify验证该交易。
+// 7) 执行applyBlock使该区块生效。
+// processBlock的最后一步是调用applyBlock继续对区块进行处理
+// 所以每次产生区块的函数调用过程是:
+// generateBlock -> processBlock -> applyBlock
 Blocks.prototype.processBlock = async (b, failedTransactions, options) => {
   if (!priv.loaded) throw new Error('Blockchain is loading')
 
@@ -789,6 +799,20 @@ Blocks.prototype.buildBlock = async (keypair, timestamp) => {
   return { block, failedTransactions }
 }
 // 生产区块
+// generateBlock主要是在受托人产块中被调用的功能函数。受托人产块过程其实已经在上一章里说过，是非常重要的一个过程。
+// 整个流程:
+// 1) 获取当前待确认的交易列表(最多N个)。
+// 2) 如果当前还有pendingBlock的话，则说明还没有达成共识，则停止这个产块流程。
+// 3) 遍历第1步获取到的待确认交易列表。
+// 4) 通过交易的senderPublicKey从getAccount中获取该用户信息。
+// 5) 如果该交易已经到位(ready)了(对于多重签名的交易，需要等到所有签名都到位才算ready)。
+// 6) base.transactions.verify验证该交易，如果验证通过，则放入ready数组。
+// 7) base.block.create创建新的区块，并且打包步骤3里面验证过的交易列表。
+// 8) verifyBlock验证新创建的区块。
+// 9) 获取本节点的受托人密钥对。
+// 10) base.consensus.createVotes用这些密钥对创建localVotes。
+// 11) base.consensus.hasEnoughVotes检查创建的votes是否足够。
+// 12) 如果votes足够，则顺利产块; 如果不足够，就需要用createPropose去收集其他节点的votes，直到达成共识。
 Blocks.prototype.generateBlock = async (keypair, timestamp) => {
   if (library.base.consensus.hasPendingBlock(timestamp)) {
     return null
@@ -835,6 +859,13 @@ Blocks.prototype.sandboxApi = (call, args, cb) => {
 
 // Events
 // 收到区块事件后的处理
+// 区块链里分为产块节点和同步节点。
+// 一个同步节点在收到区块以后怎么处理呢?这就是onReceiveBlock要做的事情。
+// 在一个节点收到新区块的时候，会有以下几种情况:
+//   ·新区块的父区块就是当前节点的区块，并且高度也是当前节点高度 + 1，说明新区块就是我们要的，则调用processBlock对这个区块进行后续操作。
+//   ·新区块高度是当前节点区块高度 + 1，但是父区块不是我们的当前区块，说明发生了分叉，则调用module.delegates.fork进行分叉记录。
+//   ·新区块的父区块是当前节点区块的父区块，高度也是当前高度，说明发生了分叉，这个新区块就是当前区块的兄弟区块，也调用module.delegates.fork进行分叉记录，但记录的分叉原因和上一个不同。
+//   ·新区块的高度大于当前节点高度 + 1，则说明当前节点的区块高度不够，则调用module.loader.startSyncBlocks进行区块同步。
 Blocks.prototype.onReceiveNewBlock = (block, votes, failedTransactions, callback) => {
   if (modules.loader.syncing() || !priv.loaded) {
     return
@@ -879,6 +910,19 @@ Blocks.prototype.onReceiveNewBlock = (block, votes, failedTransactions, callback
   }, callback)
 }
 // 收到提案后的处理，这个过程是PBFT算法的一部分
+// 一个节点在产块的时候需要发起propose，获取其他节点的确认才可以进行接下来的操作，这也是PBFT算法的一部分
+// onReceivePropose是共识达成的过程之一。onReceivePropose先会做如下异常检查:
+//   ·如果新的propose高度和当前propose高度一致，但是id不一致，则打出warn日志。
+//   ·新propose高度不等于当前propose高度 + 1，则认为是无效。进一步，如果新propose高度大于当前propose高度 + 1，认为是无效的同时，还会调用modules.loader.startSyncBlocks开始同步区块。
+//   ·如果最新一次vote的时间(这里的vote就是对propose的投票)在5秒之内，则认为propose过于频繁，忽略。
+// 如果以上检查都通过，则开始走下面流程:
+// 1) bus.message(“newPropose”...)发出新propose来临的事件。
+// 2) modules.delegates.validateProposeSlot验证此propose slot是否有效。
+// 3) base.consensus.acceptPropose接受这个新propose。
+// 4) modules.delegates.getActiveDelegateKeypairs获取本节点的受托人密钥对。
+// 5) base.consensus.createVotes使用本节点的受托人密钥对创建对propose的投票。
+// 6) 把vote发送给propose发起者。
+// 这里的votes和用户通过在线钱包对受托人进行投票不是同一个含义，需要区分清楚。
 Blocks.prototype.onReceivePropose = (propose) => {
   if (modules.loader.syncing() || !priv.loaded) {
     return
@@ -956,6 +1000,11 @@ Blocks.prototype.onReceivePropose = (propose) => {
   })
 }
 // 收到投票后的处理
+// 在其他节点对某个要生产的区块进行投票以后，产块节点需要随时处理投票的情况。
+// 如果票数足够的话则进行区块处理
+这个方法主要做了两件事:
+// ·base.consensus.addPendingVotes把收到的票先暂存起来。
+// ·base.consensus.hasEnoughVotes判断目前收到的票是否已经足够。如果已经有足够的票了，则base.consensus.getPendingBlock把之前暂存的区块再拿出来，开始进行区块处理(processBlock)。
 Blocks.prototype.onReceiveVotes = (votes) => {
   if (modules.loader.syncing() || !priv.loaded) {
     return

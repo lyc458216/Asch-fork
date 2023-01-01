@@ -34,6 +34,8 @@ priv.isCollectingVotes = false
 priv.isApplyingBlock = false
 
 // Constructor
+// 为了完成从区块的生产以及持久化的全过程，中间还需要经历共识的达成、区块的处理等。
+// 这一部分的重点就在于区块在共识中如何传递、如何持久化等
 function Blocks(cb, scope) {
   library = scope
   genesisblock = library.genesisblock
@@ -375,7 +377,7 @@ Blocks.prototype.commitGeneratedBlock = async (block, failedTransactions, votes)
     app.logger.error('failed to commit block', e)
   }
 }
-
+// 区块处理
 Blocks.prototype.processBlock = async (b, failedTransactions, options) => {
   if (!priv.loaded) throw new Error('Blockchain is loading')
 
@@ -786,7 +788,7 @@ Blocks.prototype.buildBlock = async (keypair, timestamp) => {
 
   return { block, failedTransactions }
 }
-
+// 生产区块
 Blocks.prototype.generateBlock = async (keypair, timestamp) => {
   if (library.base.consensus.hasPendingBlock(timestamp)) {
     return null
@@ -832,6 +834,7 @@ Blocks.prototype.sandboxApi = (call, args, cb) => {
 }
 
 // Events
+// 收到区块事件后的处理
 Blocks.prototype.onReceiveNewBlock = (block, votes, failedTransactions, callback) => {
   if (modules.loader.syncing() || !priv.loaded) {
     return
@@ -875,7 +878,7 @@ Blocks.prototype.onReceiveNewBlock = (block, votes, failedTransactions, callback
     return cb()
   }, callback)
 }
-
+// 收到提案后的处理，这个过程是PBFT算法的一部分
 Blocks.prototype.onReceivePropose = (propose) => {
   if (modules.loader.syncing() || !priv.loaded) {
     return
@@ -952,7 +955,7 @@ Blocks.prototype.onReceivePropose = (propose) => {
     })
   })
 }
-
+// 收到投票后的处理
 Blocks.prototype.onReceiveVotes = (votes) => {
   if (modules.loader.syncing() || !priv.loaded) {
     return

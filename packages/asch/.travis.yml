@@ -1,0 +1,26 @@
+language: node_js
+os:
+  - linux
+env:
+  - CXX=g++-4.8
+node_js:
+  - 10
+notifications:
+  recipients:
+    - sqf1225@foxmail.com
+    - ghostsky2009@gmail.com
+    - i@yanyiwu.com
+  email:
+    on_success: change
+    on_failure: always
+addons:
+  apt:
+    sources:
+      - ubuntu-toolchain-r-test
+    packages:
+      - g++-4.8
+before_script:
+     - pwd
+     - mkdir -p public/dist
+script:
+     - npm test
